@@ -1,0 +1,5 @@
+L1VM (3.6.0)
+	The L1VM JIT-compiler is now in this new repo.
+	It has two versions: stable and the experimental latest version from today.
+
+-- Stefan Pietzonke <info@midnight-coding.de> Sat 02 May 2026 00:29 +020
