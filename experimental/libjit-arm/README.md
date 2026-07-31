@@ -14,6 +14,7 @@ jmp, jmpi <br><br>
 
 movi, movd <br><br>
 
+push/pull opcodes <br><br>
 
 BUILD README
 ============

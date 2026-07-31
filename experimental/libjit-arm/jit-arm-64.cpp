@@ -172,7 +172,8 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 	// a.setLogger(&logger);					// DEBUG: switch logger on!
 
-	// set integer and double register bases
+	// set data, integer and double register bases
+	a.mov (RBX, imm ((intptr_t)(void *) data)); /* data segment base: rbx */
 	a.mov (RSI, imm ((intptr_t)(void *) regi));
     a.mov (RDI, imm ((intptr_t)(void *) regd));
 
@@ -1618,6 +1619,113 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				a.fmov (d1, d0);
 				a.str (d1, ptr (RDI, OFFSET(r2)));
 
+				run_jit = 1;
+				break;
+
+			// PUSHB, PUSHW, PUSHDW, PUSHQW =============================================
+			// load from data segment array: regi[r3] = data[regi[r1] + regi[r2]]
+			case PUSHB:
+			case PUSHW:
+			case PUSHDW:
+			case PUSHQW:
+				r1 = code[i + 1];
+				r2 = code[i + 2];
+				r3 = code[i + 3];
+
+				a.ldr (R8, ptr (RSI, OFFSET(r1))); /* array base address */
+				a.ldr (R9, ptr (RSI, OFFSET(r2))); /* index */
+				a.add (R10, R8, R9);				/* R10 = base + index */
+
+				switch (code[i])
+				{
+					case PUSHB:
+						a.ldrb (R8, ptr (RBX, R10));
+						break;
+
+					case PUSHW:
+						a.ldrh (R8, ptr (RBX, R10));
+						break;
+
+					case PUSHDW:
+						a.ldr (R8.w(), ptr (RBX, R10));
+						break;
+
+					case PUSHQW:
+						a.ldr (R8, ptr (RBX, R10));
+						break;
+				}
+
+				a.str (R8, ptr (RSI, OFFSET(r3)));
+				run_jit = 1;
+				break;
+
+			// PUSHD =========================================================================
+			// load double from data segment array: regd[r3] = data[regi[r1] + regi[r2]]
+			case PUSHD:
+				r1 = code[i + 1];
+				r2 = code[i + 2];
+				r3 = code[i + 3];
+
+				a.ldr (R8, ptr (RSI, OFFSET(r1))); /* array base address */
+				a.ldr (R9, ptr (RSI, OFFSET(r2))); /* index */
+				a.add (R10, R8, R9);				/* R10 = base + index */
+
+				a.ldr (R8, ptr (RBX, R10));
+				a.str (R8, ptr (RDI, OFFSET(r3)));
+				run_jit = 1;
+				break;
+
+			// PULLB, PULLW, PULLDW, PULLQW =================================================
+			// store to data segment array: data[regi[r2] + regi[r3]] = regi[r1]
+			case PULLB:
+			case PULLW:
+			case PULLDW:
+			case PULLQW:
+				r1 = code[i + 1];
+				r2 = code[i + 2];
+				r3 = code[i + 3];
+
+				a.ldr (R9, ptr (RSI, OFFSET(r2))); /* array base address */
+				a.ldr (R10, ptr (RSI, OFFSET(r3))); /* index */
+				a.add (R9, R9, R10);				/* R9 = base + index */
+
+				a.ldr (R8, ptr (RSI, OFFSET(r1))); /* value to store */
+
+				switch (code[i])
+				{
+					case PULLB:
+						a.strb (R8, ptr (RBX, R9));
+						break;
+
+					case PULLW:
+						a.strh (R8, ptr (RBX, R9));
+						break;
+
+					case PULLDW:
+						a.str (R8.w(), ptr (RBX, R9));
+						break;
+
+					case PULLQW:
+						a.str (R8, ptr (RBX, R9));
+						break;
+				}
+
+				run_jit = 1;
+				break;
+
+			// PULLD =========================================================================
+			// store double to data segment array: data[regi[r2] + regi[r3]] = regd[r1]
+			case PULLD:
+				r1 = code[i + 1];
+				r2 = code[i + 2];
+				r3 = code[i + 3];
+
+				a.ldr (R9, ptr (RSI, OFFSET(r2))); /* array base address */
+				a.ldr (R10, ptr (RSI, OFFSET(r3))); /* index */
+				a.add (R9, R9, R10);				/* R9 = base + index */
+
+				a.ldr (R8, ptr (RDI, OFFSET(r1))); /* value to store */
+				a.str (R8, ptr (RBX, R9));
 				run_jit = 1;
 				break;
 

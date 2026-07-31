@@ -171,6 +171,8 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
   	x86::Assembler a(&jcode);           // Create and attach x86::Assembler to code.
 
     // X86Gp RSIback;
+    a.push (RBX);								/* save RBX: callee saved register */
+    a.mov (RBX, imm ((intptr_t)(void *) data)); /* data segment base: rbx */
     a.mov (RSI, imm ((intptr_t)(void *) regi)); /* long registers base: rsi */
 	a.mov (RDI, imm ((intptr_t)(void *) regd)); /* double registers base: rdi */
 
@@ -1899,6 +1901,113 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				run_jit = 1;
 				break;
 
+			// PUSHB, PUSHW, PUSHDW, PUSHQW =============================================
+			// load from data segment array: regi[r3] = data[regi[r1] + regi[r2]]
+			case PUSHB:
+			case PUSHW:
+			case PUSHDW:
+			case PUSHQW:
+				r1 = code[i + 1];
+				r2 = code[i + 2];
+				r3 = code[i + 3];
+
+				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* array base address */
+				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* index */
+				a.add (R8, R9);					/* R8 = base + index */
+
+				switch (code[i])
+				{
+					case PUSHB:
+						a.movzx (R8, asmjit::x86::byte_ptr (RBX, R8));
+						break;
+
+					case PUSHW:
+						a.movzx (R8, asmjit::x86::word_ptr (RBX, R8));
+						break;
+
+					case PUSHDW:
+						a.movzx (R8, asmjit::x86::dword_ptr (RBX, R8));
+						break;
+
+					case PUSHQW:
+						a.mov (R8, asmjit::x86::qword_ptr (RBX, R8));
+						break;
+				}
+
+				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
+				run_jit = 1;
+				break;
+
+			// PUSHD =========================================================================
+			// load double from data segment array: regd[r3] = data[regi[r1] + regi[r2]]
+			case PUSHD:
+				r1 = code[i + 1];
+				r2 = code[i + 2];
+				r3 = code[i + 3];
+
+				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* array base address */
+				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* index */
+				a.add (R8, R9);					/* R8 = base + index */
+
+				a.mov (R8, asmjit::x86::qword_ptr (RBX, R8));
+				a.mov (asmjit::x86::qword_ptr (RDI, OFFSET(r3)), R8);
+				run_jit = 1;
+				break;
+
+			// PULLB, PULLW, PULLDW, PULLQW =================================================
+			// store to data segment array: data[regi[r2] + regi[r3]] = regi[r1]
+			case PULLB:
+			case PULLW:
+			case PULLDW:
+			case PULLQW:
+				r1 = code[i + 1];
+				r2 = code[i + 2];
+				r3 = code[i + 3];
+
+				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* array base address */
+				a.mov (R10, asmjit::x86::qword_ptr (RSI, OFFSET(r3))); /* index */
+				a.add (R9, R10);				/* R9 = base + index */
+
+				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* value to store */
+
+				switch (code[i])
+				{
+					case PULLB:
+						a.mov (asmjit::x86::byte_ptr (RBX, R9), asmjit::x86::r8b);
+						break;
+
+					case PULLW:
+						a.mov (asmjit::x86::word_ptr (RBX, R9), asmjit::x86::r8w);
+						break;
+
+					case PULLDW:
+						a.mov (asmjit::x86::dword_ptr (RBX, R9), asmjit::x86::r8d);
+						break;
+
+					case PULLQW:
+						a.mov (asmjit::x86::qword_ptr (RBX, R9), R8);
+						break;
+				}
+
+				run_jit = 1;
+				break;
+
+			// PULLD =========================================================================
+			// store double to data segment array: data[regi[r2] + regi[r3]] = regd[r1]
+			case PULLD:
+				r1 = code[i + 1];
+				r2 = code[i + 2];
+				r3 = code[i + 3];
+
+				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* array base address */
+				a.mov (R10, asmjit::x86::qword_ptr (RSI, OFFSET(r3))); /* index */
+				a.add (R9, R10);				/* R9 = base + index */
+
+				a.mov (R8, asmjit::x86::qword_ptr (RDI, OFFSET(r1))); /* value to store */
+				a.mov (asmjit::x86::qword_ptr (RBX, R9), R8);
+				run_jit = 1;
+				break;
+
 			// DEFAULT: output ERROR message if oopcode not found! =====================
 			default:
                 printf ("JIT compiler: UNKNOWN opcode: %i - exiting!\n", code[i]);
@@ -1909,6 +2018,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
     if (run_jit)
     {
+        a.pop (RBX);		// restore RBX: callee saved register
         a.ret ();		// return to main program code
 
         // create JIT code function

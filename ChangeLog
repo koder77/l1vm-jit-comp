@@ -1,3 +1,8 @@
+L1VM (3.6.4)
+	experimental/ NEW: push/pull opcodes added for variable access read/write.
+
+-- Stefan Pietzonke <info@midnight-coding.de> Fri 31 July 2026 16:32 +020
+
 L1VM (3.6.0)
 	The L1VM JIT-compiler is now in this new repo.
 	It has two versions: stable and the experimental latest version from today.
