@@ -849,7 +849,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				else
 				{
 					if (JIT_label_ind == MAXJUMPLEN)
-					{
+				    {
 						printf ("JIT compiler: error label list full!\n");
 						return (1);
 					}
@@ -863,7 +863,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				a.je (JIT_label[JIT_label_ind].lab);		// jump equal
 
 				// code for not equal than
-				a.mov (R8, Imm (1));
+				a.mov (R8, Imm (0));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
 				// set label for jump equal
