@@ -16,6 +16,8 @@ movi, movd <br><br>
 
 push/pull opcodes <br><br>
 
+load opcodes <br><br>
+
 BUILD README
 ============
 You have to build the asmjit library in "asmjit" directory first!

@@ -148,6 +148,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
     S8 r3 ALIGN;
     S2 offset;
     U1 label_created;
+    U1 label_bound;
     S8 label ALIGN;
     U1 run_jit = 0;
 
@@ -205,6 +206,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
         /* check if current opcode is on label */
 		label_created = 0;
+		label_bound = 0;
 
 		// printf ("DEBUG: jit_compiler: code_size: %lli\n", code_size);
 
@@ -216,44 +218,49 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 			{
 				/* create label */
 
-                for (l = 0; l < MAXJUMPLEN; l++)
+				if (label_bound == 0)
 				{
-					if (JIT_label[l].pos == i)
+					for (l = 0; l < MAXJUMPLEN; l++)
 					{
-						label_created = 1;
-						label = l;
-						break;
+						if (JIT_label[l].pos == i)
+						{
+							label_created = 1;
+							label = l;
+							break;
+						}
 					}
-				}
 
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
+					if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
 					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
+						JIT_label_ind++;
 					}
-				}
+					else
+					{
+						if (JIT_label_ind == MAXJUMPLEN)
+						{
+							printf ("JIT compiler: error label list full!\n");
+							return (1);
+						}
+					}
 
-				if (label_created == 0)
-				{
-					JIT_label[JIT_label_ind].lab = a.new_label ();
-					JIT_label[JIT_label_ind].pos = jumpoffs[j];
-					JIT_label[JIT_label_ind].if_ = -1;
-					JIT_label[JIT_label_ind].endif = -1;
-					a.bind (JIT_label[JIT_label_ind].lab);
-				}
-				else
-				{
-					a.bind (JIT_label[label].lab);
+					if (label_created == 0)
+					{
+						JIT_label[JIT_label_ind].lab = a.new_label ();
+						JIT_label[JIT_label_ind].pos = jumpoffs[j];
+						JIT_label[JIT_label_ind].if_ = -1;
+						JIT_label[JIT_label_ind].endif = -1;
+						a.bind (JIT_label[JIT_label_ind].lab);
+					}
+					else
+					{
+						a.bind (JIT_label[label].lab);
 
-                    #if DEBUG
-                        printf ("LABEL binded!\n");
-                    #endif
+						#if DEBUG
+							printf ("LABEL binded!\n");
+						#endif
+					}
+
+					label_bound = 1;
 				}
             }
         }
@@ -2005,6 +2012,72 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 				a.mov (R8, asmjit::x86::qword_ptr (RDI, OFFSET(r1))); /* value to store */
 				a.mov (asmjit::x86::qword_ptr (RBX, R9), R8);
+				run_jit = 1;
+				break;
+
+			// LOADA, LOADD ============================================================
+			// load from data segment: data[arg1 + arg2] -> regi[r3] (LOADA) / regd[r3] (LOADD)
+			case LOADA:
+			case LOADD:
+				#if DEBUG
+					printf ("JIT-compiler: opcode: %i\n", code[i]);
+				#endif
+
+				memcpy (&r1, &code[i + 1], sizeof (uint64_t));		/* arg1 */
+				memcpy (&r2, &code[i + 9], sizeof (uint64_t));		/* arg2 */
+				r3 = code[i + 17];									/* target register */
+
+				a.mov (R8, Imm (r1));
+				a.mov (R9, Imm (r2));
+				a.add (R8, R9);										/* R8 = arg1 + arg2 */
+
+				a.mov (R8, asmjit::x86::qword_ptr (RBX, R8));		/* load 8 bytes from data segment */
+
+				if (code[i] == LOADA)
+				{
+					a.mov (asmjit::x86::qword_ptr (RSI, OFFSET (r3)), R8);	/* regi[r3] = value */
+				}
+				else
+				{
+					a.mov (asmjit::x86::qword_ptr (RDI, OFFSET (r3)), R8);	/* regd[r3] = value */
+				}
+
+				run_jit = 1;
+				break;
+
+			// LOADL ===================================================================
+			// load literal: regi[r2] = arg1
+			case LOADL:
+				#if DEBUG
+					printf ("JIT-compiler: opcode: %i\n", code[i]);
+				#endif
+
+				memcpy (&r1, &code[i + 1], sizeof (uint64_t));		/* literal */
+				r2 = code[i + 9];									/* target register */
+
+				a.mov (R8, Imm (r1));
+				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET (r2)), R8);	/* regi[r2] = literal */
+
+				run_jit = 1;
+				break;
+
+			// LOAD ====================================================================
+			// load address: regi[r3] = arg1 + arg2
+			case LOAD:
+				#if DEBUG
+					printf ("JIT-compiler: opcode: %i\n", code[i]);
+				#endif
+
+				memcpy (&r1, &code[i + 1], sizeof (uint64_t));		/* arg1 */
+				memcpy (&r2, &code[i + 9], sizeof (uint64_t));		/* arg2 */
+				r3 = code[i + 17];									/* target register */
+
+				a.mov (R8, Imm (r1));
+				a.mov (R9, Imm (r2));
+				a.add (R8, R9);										/* R8 = arg1 + arg2 */
+
+				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET (r3)), R8);	/* regi[r3] = address */
+
 				run_jit = 1;
 				break;
 

@@ -1622,6 +1622,81 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				run_jit = 1;
 				break;
 
+			// LOADL =====================================================================
+			// load 64 bit literal into integer register: regi[r2] = arg1
+			case LOADL:
+				#if DEBUG
+				printf ("LOADL: arg1 = %lli, R2 = %lli\n", r1, r2);
+				#endif
+
+				memcpy (&r1, &code[i + 1], sizeof (uint64_t));
+				r2 = code[i + 9];
+
+				a.mov (R8, imm (r1));
+				a.str (R8, ptr (RSI, OFFSET(r2)));
+
+				run_jit = 1;
+				break;
+
+			// LOAD ======================================================================
+			// compute address: regi[r3] = arg1 + arg2
+			case LOAD:
+				#if DEBUG
+				printf ("LOAD: arg1 = %lli, arg2 = %lli, R3 = %lli\n", r1, r2, r3);
+				#endif
+
+				memcpy (&r1, &code[i + 1], sizeof (uint64_t));
+				memcpy (&r2, &code[i + 9], sizeof (uint64_t));
+				r3 = code[i + 17];
+
+				a.mov (R8, imm (r1));
+				a.mov (R9, imm (r2));
+				a.add (R10, R8, R9);			/* R10 = arg1 + arg2 */
+				a.str (R10, ptr (RSI, OFFSET(r3)));
+
+				run_jit = 1;
+				break;
+
+			// LOADA =====================================================================
+			// load 64 bit int from data segment: regi[r3] = data[arg1 + arg2]
+			case LOADA:
+				#if DEBUG
+				printf ("LOADA: arg1 = %lli, arg2 = %lli, R3 = %lli\n", r1, r2, r3);
+				#endif
+
+				memcpy (&r1, &code[i + 1], sizeof (uint64_t));
+				memcpy (&r2, &code[i + 9], sizeof (uint64_t));
+				r3 = code[i + 17];
+
+				a.mov (R8, imm (r1));
+				a.mov (R9, imm (r2));
+				a.add (R10, R8, R9);			/* R10 = arg1 + arg2 */
+				a.ldr (R8, ptr (RBX, R10));		/* load 64 bit from data segment */
+				a.str (R8, ptr (RSI, OFFSET(r3)));
+
+				run_jit = 1;
+				break;
+
+			// LOADD =====================================================================
+			// load 64 bit double from data segment: regd[r3] = data[arg1 + arg2]
+			case LOADD:
+				#if DEBUG
+				printf ("LOADD: arg1 = %lli, arg2 = %lli, R3 = %lli\n", r1, r2, r3);
+				#endif
+
+				memcpy (&r1, &code[i + 1], sizeof (uint64_t));
+				memcpy (&r2, &code[i + 9], sizeof (uint64_t));
+				r3 = code[i + 17];
+
+				a.mov (R8, imm (r1));
+				a.mov (R9, imm (r2));
+				a.add (R10, R8, R9);			/* R10 = arg1 + arg2 */
+				a.ldr (R8, ptr (RBX, R10));		/* load 64 bit from data segment */
+				a.str (R8, ptr (RDI, OFFSET(r3)));
+
+				run_jit = 1;
+				break;
+
 			// PUSHB, PUSHW, PUSHDW, PUSHQW =============================================
 			// load from data segment array: regi[r3] = data[regi[r1] + regi[r2]]
 			case PUSHB:

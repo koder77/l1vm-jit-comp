@@ -1,5 +1,5 @@
 L1VM (3.6.4)
-	experimental/ NEW: push/pull opcodes added for variable access read/write.
+	experimental/ NEW: push/pull opcodes added for variable access read/write. And load opcodes.
 
 -- Stefan Pietzonke <info@midnight-coding.de> Fri 31 July 2026 16:32 +020
 
