@@ -868,6 +868,8 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
 				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
 
+				a.cmp (R8, R9);		// compare R8, R9
+
 				// set label for JUMP equal
 				if (JIT_label_ind < MAXJUMPLEN)
 				{
@@ -1478,10 +1480,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.jg (JIT_label[JIT_label_ind].lab);		// jump equal
+				a.jg (JIT_label[JIT_label_ind].lab);		// jump greater
 
-				// code for not equal than
-				a.mov (R8, Imm (1));
+				// code for not greater than
+				a.mov (R8, Imm (0));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
 				// set label for jump equal
@@ -1507,13 +1509,13 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 				a.jmp (JIT_label[JIT_label_ind].lab);
 
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
+				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp greater
 
-				// code for equal than
-				a.mov (R8, Imm (0));
+				// code for greater than
+				a.mov (R8, Imm (1));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.bind (JIT_label[JIT_label_ind].lab);		// set label for greater jump
 
 				run_jit = 1;
 				break;
@@ -1552,10 +1554,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.jl (JIT_label[JIT_label_ind].lab);		// jump equal
+				a.jl (JIT_label[JIT_label_ind].lab);		// jump lower
 
-				// code for not equal than
-				a.mov (R8, Imm (1));
+				// code for not lower than
+				a.mov (R8, Imm (0));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
 				// set label for jump equal
@@ -1581,13 +1583,13 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 				a.jmp (JIT_label[JIT_label_ind].lab);
 
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
+				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp lower
 
-				// code for equal than
-				a.mov (R8, Imm (0));
+				// code for lower than
+				a.mov (R8, Imm (1));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.bind (JIT_label[JIT_label_ind].lab);		// set label for lower jump
 
 				run_jit = 1;
 				break;
@@ -1626,10 +1628,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.jge (JIT_label[JIT_label_ind].lab);		// jump equal
+				a.jge (JIT_label[JIT_label_ind].lab);		// jump greater or equal
 
-				// code for not equal than
-				a.mov (R8, Imm (1));
+				// code for less than
+				a.mov (R8, Imm (0));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
 				// set label for jump equal
@@ -1655,13 +1657,13 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 				a.jmp (JIT_label[JIT_label_ind].lab);
 
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
+				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp greater or equal
 
-				// code for equal than
-				a.mov (R8, Imm (0));
+				// code for greater or equal than
+				a.mov (R8, Imm (1));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.bind (JIT_label[JIT_label_ind].lab);		// set label for greater or equal jump
 
 				run_jit = 1;
 				break;
@@ -1700,10 +1702,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.jle (JIT_label[JIT_label_ind].lab);		// jump equal
+				a.jle (JIT_label[JIT_label_ind].lab);		// jump lower or equal
 
-				// code for not equal than
-				a.mov (R8, Imm (1));
+				// code for greater than
+				a.mov (R8, Imm (0));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
 				// set label for jump equal
@@ -1729,13 +1731,13 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 				a.jmp (JIT_label[JIT_label_ind].lab);
 
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
+				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp lower or equal
 
-				// code for equal than
-				a.mov (R8, Imm (0));
+				// code for lower or equal than
+				a.mov (R8, Imm (1));
 				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.bind (JIT_label[JIT_label_ind].lab);		// set label for lower or equal jump
 
 				run_jit = 1;
 				break;

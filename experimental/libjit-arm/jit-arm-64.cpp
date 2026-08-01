@@ -576,7 +576,9 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r3 = code[i + 3];
 
 				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				a.ldr (R9, ptr (RSI, OFFSET(r2)));
+
+				a.cmp (R8, R9);		// compare R8, R9
 
 				// set label for JUMP equal
 				if (JIT_label_ind < MAXJUMPLEN)
@@ -600,7 +602,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				a.b_eq (JIT_label[JIT_label_ind].lab);		// jump equal
 
 				// code for not equal than
-				a.mov (R8, Imm (1));
+				a.mov (R8, Imm (0));
 				a.str (R8, ptr (RSI, OFFSET(r3)));
 
 				// set label for jump equal
@@ -629,7 +631,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
 
 				// code for equal than
-				a.mov (R8, Imm (0));
+				a.mov (R8, Imm (1));
 				a.str (R8, ptr (RSI, OFFSET(r3)));
 
 				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
@@ -671,7 +673,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.b (JIT_label[JIT_label_ind].lab);		// jump equal
+				a.b_ne (JIT_label[JIT_label_ind].lab);		// jump not equal
 
 				a.mov (R8, Imm (0));
 				a.str (R8, ptr (RSI, OFFSET(r3)));
@@ -794,11 +796,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r3 = code[i + 3];
 
 				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				a.ldr (R9, ptr (RSI, OFFSET(r2)));
 
 				a.cmp (R8, R9);		// compare R8, R9
 
-				// set label for JUMP equal
+				// set label for JUMP lower
 				if (JIT_label_ind < MAXJUMPLEN)
 				{
 					JIT_label_ind++;
@@ -817,7 +819,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.b_le (JIT_label[JIT_label_ind].lab);		// jump equal
+				a.b_lt (JIT_label[JIT_label_ind].lab);		// jump lower
 
 				// code for not equal than
 				a.mov (R8, Imm (0));
@@ -1165,11 +1167,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r3 = code[i + 3];
 
 				a.ldr (d0, ptr (RDI, OFFSET(r1)));
-                a.ldr (d1, ptr (RDI, OFFSET(r2)));
+				a.ldr (d1, ptr (RDI, OFFSET(r2)));
 
 				a.fcmp (d0, d1);
 
-				// set label for JUMP equal
+				// set label for JUMP greater
 				if (JIT_label_ind < MAXJUMPLEN)
 				{
 					JIT_label_ind++;
@@ -1188,7 +1190,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.b_ge (JIT_label[JIT_label_ind].lab);		// jump equal
+				a.b_gt (JIT_label[JIT_label_ind].lab);		// jump greater
 
 				// code for not equal than
 				a.mov (R8, Imm (0));
@@ -1239,11 +1241,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r3 = code[i + 3];
 
 				a.ldr (d0, ptr (RDI, OFFSET(r1)));
-                a.ldr (d1, ptr (RDI, OFFSET(r2)));
+				a.ldr (d1, ptr (RDI, OFFSET(r2)));
 
 				a.fcmp (d0, d1);
 
-				// set label for JUMP equal
+				// set label for JUMP lower
 				if (JIT_label_ind < MAXJUMPLEN)
 				{
 					JIT_label_ind++;
@@ -1262,7 +1264,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.b_ls (JIT_label[JIT_label_ind].lab);		// jump equal
+				a.b_lt (JIT_label[JIT_label_ind].lab);		// jump lower
 
 				// code for not equal than
 				a.mov (R8, Imm (0));
