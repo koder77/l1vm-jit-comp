@@ -59,7 +59,7 @@ typedef void (*Func)(void);
 #define MAXREGJIT_DOUBLE 16
 
 
-#define OFFSET(x) x * 8
+#define OFFSET(x) ((x) * 8)
 #define JIT_X86_64 1
 
 	#if JIT_X86_64
@@ -94,7 +94,8 @@ S8 JIT_label_ind ALIGN = -1;
 
 
 // for storing VM registers
-// S8 jit_regs[MAXREGJIT_INT];			// R8 (0) to R11 (3)
+S8 jit_regs[MAXREGJIT_INT];			// R8 (0) to R11 (3): VM register number + 1, 0 = free
+U1 jit_regs_dirty[MAXREGJIT_INT];	// 1 = value in CPU register changed, must be stored to memory before flush
 S8 jit_regsd[MAXREGJIT_DOUBLE]; 	// xmm0 (0) to xmm5 (5)
 
 // double registers code ======================================================
@@ -138,6 +139,171 @@ S8 set_double_reg (S8 cpu_reg, S8 reg)
 	return (1);
 }
 
+// int registers code ==========================================================
+x86::Gp int_cpu_reg (S8 idx)
+{
+	switch (idx)
+	{
+		case 0: return (x86::r8);
+		case 1: return (x86::r9);
+		case 2: return (x86::r10);
+		case 3: return (x86::r11);
+	}
+	return (x86::r8);
+}
+
+S8 get_int_reg (S8 reg)
+{
+	S8 i;
+
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		if (jit_regs[i] == reg + 1)
+		{
+			return (i);
+		}
+	}
+	return (-1);	// jit register not found
+}
+
+S8 get_free_int_reg (void)
+{
+	S8 i;
+
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		if (jit_regs[i] == 0)
+		{
+			return (i);
+		}
+	}
+	return (-1);	// no free jit register found
+}
+
+void set_int_reg (S8 cpu_reg, S8 reg)
+{
+	jit_regs[cpu_reg] = reg + 1;
+}
+
+void free_int_reg (S8 cpu_reg)
+{
+	jit_regs[cpu_reg] = 0;
+	jit_regs_dirty[cpu_reg] = 0;
+}
+
+void flush_int_reg (x86::Assembler &a, S8 cpu_reg)
+{
+	// store dirty CPU register value to VM register in memory
+	if (jit_regs_dirty[cpu_reg] == 1)
+	{
+		a.mov (asmjit::x86::qword_ptr (RSI, OFFSET (jit_regs[cpu_reg] - 1)), int_cpu_reg (cpu_reg));
+		jit_regs_dirty[cpu_reg] = 0;
+	}
+}
+
+void flush_int_regs (x86::Assembler &a)
+{
+	S8 i;
+
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		flush_int_reg (a, i);
+	}
+}
+
+void clear_int_regs (void)
+{
+	S8 i;
+
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		jit_regs[i] = 0;
+		jit_regs_dirty[i] = 0;
+	}
+}
+
+S8 alloc_int_reg (x86::Assembler &a, S8 reg, S8 avoid1, S8 avoid2, S8 avoid3)
+{
+	S8 cur;
+	S8 i;
+
+	cur = get_int_reg (reg);
+	if (cur != -1)
+	{
+		return (cur);
+	}
+
+	cur = get_free_int_reg ();
+	if (cur == -1)
+	{
+		// evict a CPU register, but do not evict registers holding avoid1, avoid2, avoid3
+		for (i = 0; i < MAXREGJIT_INT; i++)
+		{
+			if (jit_regs[i] != avoid1 + 1 && jit_regs[i] != avoid2 + 1 && jit_regs[i] != avoid3 + 1 && jit_regs_dirty[i] == 0)
+			{
+				cur = i;
+				break;
+			}
+		}
+
+		if (cur == -1)
+		{
+			for (i = 0; i < MAXREGJIT_INT; i++)
+			{
+				if (jit_regs[i] != avoid1 + 1 && jit_regs[i] != avoid2 + 1 && jit_regs[i] != avoid3 + 1)
+				{
+					cur = i;
+					break;
+				}
+			}
+		}
+
+		if (cur == -1)
+		{
+			cur = 0;
+		}
+
+		flush_int_reg (a, cur);
+		free_int_reg (cur);
+	}
+
+	set_int_reg (cur, reg);
+	jit_regs_dirty[cur] = 0;
+	return (cur);
+}
+
+S8 load_int_reg (x86::Assembler &a, S8 reg, S8 avoid1, S8 avoid2, S8 avoid3)
+{
+	S8 cur;
+
+	cur = get_int_reg (reg);
+	if (cur != -1)
+	{
+		return (cur);
+	}
+
+	cur = alloc_int_reg (a, reg, avoid1, avoid2, avoid3);
+	a.mov (int_cpu_reg (cur), asmjit::x86::qword_ptr (RSI, OFFSET (reg)));
+	jit_regs_dirty[cur] = 0;
+	return (cur);
+}
+
+S8 result_int_reg (x86::Assembler &a, S8 reg, S8 avoid1, S8 avoid2, S8 avoid3)
+{
+	S8 cur;
+
+	cur = get_int_reg (reg);
+	if (cur != -1)
+	{
+		jit_regs_dirty[cur] = 1;
+		return (cur);
+	}
+
+	cur = alloc_int_reg (a, reg, avoid1, avoid2, avoid3);
+	jit_regs_dirty[cur] = 1;
+	return (cur);
+}
+
 extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *regd, U1 *sp, U1 *sp_top, U1 *sp_bottom, S8 start, S8 end, struct JIT_code *JIT_code, S8 JIT_code_ind, S8 code_size)
 {
     S8 i ALIGN;
@@ -155,6 +321,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 	S8 r1_d ALIGN;
 	S8 r2_d ALIGN;
 	S8 r3_d ALIGN;
+
+	// CPU registers used for int register tracking
+	S8 A ALIGN;
+	S8 B ALIGN;
+	S8 C ALIGN;
 
 	// JMP opcode:
 	U1 jump_ok = 0;
@@ -194,6 +365,13 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 	for (i = 0; i <= 5; i++)
 	{
 		jit_regsd[i] = 0;
+	}
+
+	// init int registers
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		jit_regs[i] = 0;
+		jit_regs_dirty[i] = 0;
 	}
 
     i = start;
@@ -259,6 +437,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 							printf ("LABEL binded!\n");
 						#endif
 					}
+
+					// a label can be reached from different code paths: store all
+					// dirty int registers to memory and reset int register tracking
+					flush_int_regs (a);
+					clear_int_regs ();
 
 					label_bound = 1;
 				}
@@ -382,7 +565,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 						case MULI:
 							printf ("MULI\n\n");
-							break; ssns
+							break;
 
 						case DIVI:
 							printf ("DIVI\n\n");
@@ -390,32 +573,59 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 					}
 				#endif
 
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
 				switch (code[i])
 				{
 					case ADDI:
-						a.add (R8, R9);
+						if (C == A)
+						{
+							a.add (int_cpu_reg (A), int_cpu_reg (B));
+						}
+						else
+						{
+							a.mov (RCX, int_cpu_reg (A));
+							a.add (RCX, int_cpu_reg (B));
+							a.mov (int_cpu_reg (C), RCX);
+						}
 						break;
 
 					case SUBI:
-						a.sub (R8, R9);
+						if (C == A)
+						{
+							a.sub (int_cpu_reg (A), int_cpu_reg (B));
+						}
+						else
+						{
+							a.mov (RCX, int_cpu_reg (A));
+							a.sub (RCX, int_cpu_reg (B));
+							a.mov (int_cpu_reg (C), RCX);
+						}
 						break;
 
 					case MULI:
-						a.imul (R8, R9);
+						if (C == A)
+						{
+							a.imul (int_cpu_reg (A), int_cpu_reg (B));
+						}
+						else
+						{
+							a.mov (RCX, int_cpu_reg (A));
+							a.imul (RCX, int_cpu_reg (B));
+							a.mov (int_cpu_reg (C), RCX);
+						}
 						break;
 
 					case DIVI:
-						a.mov (RAX, R8);
+						a.mov (RAX, int_cpu_reg (A));
 						a.cqo ();
-						a.idiv (R9);
-						a.mov (R8, RAX);
+						a.idiv (int_cpu_reg (B));
+						a.mov (int_cpu_reg (C), RAX);
 						break;
 				}
 
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 				run_jit = 1;
 				break;
 
@@ -424,6 +634,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 			case SUBD:
 			case MULD:
 			case DIVD:
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
+
 				// double precision floating point using SSE
 				r1 = code[i + 1];
 				r2 = code[i + 2];
@@ -628,208 +843,94 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 			// LOGICAL OPCODES =========================================================
 			case ANDI:
-				#if DEBUG
-				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("ANDI\n\n");
-				#endif
-				r1 = code[i + 1];
-				r2 = code[i + 2];
-				r3 = code[i + 3];
-
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r1v */
-
-				a.mov (R10, Imm (0));  // compare with zero
-
-				a.cmp (R8, R10);		// compare R8, R10
-
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				// set jump  pos to JIT_label
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = -1;
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.je (JIT_label[JIT_label_ind].lab);
-				a.cmp (R9, R10);		// compare R9, R10
-
-				a.je (JIT_label[JIT_label_ind].lab);
-
-				a.mov (R10, Imm (1));  // set R10
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R10);
-
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				// set jump  pos to JIT_label
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = -1;
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jmp (JIT_label[JIT_label_ind].lab);
-
-				// and not true
-				a.bind (JIT_label[JIT_label_ind - 1].lab);
-
-				a.mov (R10, Imm (0));  // set R10
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R10);
-
-				// end ANDI
-				a.bind (JIT_label[JIT_label_ind].lab);
-
-				run_jit = 1;
-				break;
-
 			case ORI:
 				#if DEBUG
 				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("ORI\n\n");
+				printf ("ANDI / ORI\n\n");
 				#endif
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r1v */
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.mov (R10, Imm (0));  // compare with zero
-				a.cmp (R8, R10);		// compare R8, R10
+				a.test (int_cpu_reg (A), int_cpu_reg (A));
+				a.setne (x86::cl);
+				a.test (int_cpu_reg (B), int_cpu_reg (B));
+				a.setne (x86::ch);
 
-				if (JIT_label_ind < MAXJUMPLEN)
+				if (code[i] == ANDI)
 				{
-					JIT_label_ind++;
+					a.and_ (x86::cl, x86::ch);
 				}
 				else
 				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
+					a.or_ (x86::cl, x86::ch);
 				}
 
-				// set jump  pos to JIT_label
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = -1;
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jne (JIT_label[JIT_label_ind].lab);
-
-				a.cmp (R9, R10);		// compare R9, R10
-				a.jne (JIT_label[JIT_label_ind].lab);
-
-				// set zero
-				a.mov (R10, Imm (0));  // set R10
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R10);
-
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				// set jump  pos to JIT_label
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = -1;
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jmp (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);
-				// set one
-				a.mov (R10, Imm (1));  // set R10
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R10);
-
-				a.bind (JIT_label[JIT_label_ind].lab);
+				a.movzx (int_cpu_reg (C), x86::cl);
 
 				run_jit = 1;
 				break;
 
 			case BANDI:
-				#if DEBUG
-				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("BANDI\n\n");
-				#endif
-				r1 = code[i + 1];
-				r2 = code[i + 2];
-				r3 = code[i + 3];
-
-				a.movq (asmjit::x86::mm0, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.movq (asmjit::x86::mm1, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
-
-				a.pand (asmjit::x86::mm0, asmjit::x86::mm1);
-
-				a.movq (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), asmjit::x86::mm0);
-
-				run_jit = 1;
-				break;
-
 			case BORI:
-				#if DEBUG
-				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("BORI\n\n");
-				#endif
-				r1 = code[i + 1];
-				r2 = code[i + 2];
-				r3 = code[i + 3];
-
-				a.movq (asmjit::x86::mm0, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.movq (asmjit::x86::mm1, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
-
-				a.por (asmjit::x86::mm0, asmjit::x86::mm1);
-
-				a.movq (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), asmjit::x86::mm0);
-
-				run_jit = 1;
-				break;
-
 			case BXORI:
 				#if DEBUG
 				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("BXORI\n\n");
+				printf ("BANDI / BORI / BXORI\n\n");
 				#endif
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.movq (asmjit::x86::mm0, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.movq (asmjit::x86::mm1, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.pxor (asmjit::x86::mm0, asmjit::x86::mm1);
+				switch (code[i])
+				{
+					case BANDI:
+						if (C == A)
+						{
+							a.and_ (int_cpu_reg (A), int_cpu_reg (B));
+						}
+						else
+						{
+							a.mov (RCX, int_cpu_reg (A));
+							a.and_ (RCX, int_cpu_reg (B));
+							a.mov (int_cpu_reg (C), RCX);
+						}
+						break;
 
-				a.movq (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), asmjit::x86::mm0);
+					case BORI:
+						if (C == A)
+						{
+							a.or_ (int_cpu_reg (A), int_cpu_reg (B));
+						}
+						else
+						{
+							a.mov (RCX, int_cpu_reg (A));
+							a.or_ (RCX, int_cpu_reg (B));
+							a.mov (int_cpu_reg (C), RCX);
+						}
+						break;
+
+					case BXORI:
+						if (C == A)
+						{
+							a.xor_ (int_cpu_reg (A), int_cpu_reg (B));
+						}
+						else
+						{
+							a.mov (RCX, int_cpu_reg (A));
+							a.xor_ (RCX, int_cpu_reg (B));
+							a.mov (int_cpu_reg (C), RCX);
+						}
+						break;
+				}
 
 				run_jit = 1;
 				break;
@@ -843,456 +944,69 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.mov (RAX, asmjit::x86::qword_ptr (RSI, OFFSET(r1)));
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
+				a.mov (RAX, int_cpu_reg (A));
 				a.cqo ();
-				a.idiv (R9);
+				a.idiv (int_cpu_reg (B));
 
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), RDX);
+				a.mov (int_cpu_reg (C), RDX);
 
 				run_jit = 1;
 				break;
 
 			// COMPARE OPCODES INT =====================================================
 			case EQI:
-				#if DEBUG
-				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("EQI\n\n");
-				#endif
-
-				r1 = code[i + 1];
-				r2 = code[i + 2];
-				r3 = code[i + 3];
-
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
-
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.je (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jmp (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
-
-				run_jit = 1;
-				break;
-
 			case NEQI:
-				#if DEBUG
-				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("NEQI\n\n");
-				#endif
-
-				r1 = code[i + 1];
-				r2 = code[i + 2];
-				r3 = code[i + 3];
-
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
-
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.je (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				a.mov (R8, Imm (1));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-						JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jmp (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				a.mov (R8, Imm (0));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
-
-				run_jit = 1;
-				break;
-
 			case GRI:
-				#if DEBUG
-				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("GRI\n\n");
-				#endif
-
-				r1 = code[i + 1];
-				r2 = code[i + 2];
-				r3 = code[i + 3];
-
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
-
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jg (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jmp (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
-
-				run_jit = 1;
-				break;
-
 			case LSI:
-				#if DEBUG
-				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("LSI\n\n");
-				#endif
-
-				r1 = code[i + 1];
-				r2 = code[i + 2];
-				r3 = code[i + 3];
-
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
-
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jl (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jmp (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
-
-				run_jit = 1;
-				break;
-
 			case GREQI:
-				#if DEBUG
-				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("GREQI\n\n");
-				#endif
-
-				r1 = code[i + 1];
-				r2 = code[i + 2];
-				r3 = code[i + 3];
-
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
-
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jge (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jmp (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
-
-				run_jit = 1;
-				break;
-
 			case LSEQI:
 				#if DEBUG
 				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
-				printf ("LSEQI\n\n");
+				printf ("EQI / NEQI / GRI / LSI / GREQI / LSEQI\n\n");
 				#endif
 
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* r2v */
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
+				a.cmp (int_cpu_reg (A), int_cpu_reg (B));		// compare A, B
 
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
+				switch (code[i])
 				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
+					case EQI:
+						a.sete (int_cpu_reg (C).r8 ());
+						break;
 
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
+					case NEQI:
+						a.setne (int_cpu_reg (C).r8 ());
+						break;
 
-				a.jle (JIT_label[JIT_label_ind].lab);		// jump equal
+					case GRI:
+						a.setg (int_cpu_reg (C).r8 ());
+						break;
 
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
+					case LSI:
+						a.setl (int_cpu_reg (C).r8 ());
+						break;
 
-				// set label for jump equal
+					case GREQI:
+						a.setge (int_cpu_reg (C).r8 ());
+						break;
 
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
+					case LSEQI:
+						a.setle (int_cpu_reg (C).r8 ());
+						break;
 				}
 
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.jmp (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.movzx (int_cpu_reg (C), int_cpu_reg (C).r8 ());
 
 				run_jit = 1;
 				break;
@@ -1304,6 +1018,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				printf ("EQD\n\n");
 				#endif
 
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
@@ -1378,6 +1096,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				printf ("EQD\n\n");
 				#endif
 
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
@@ -1452,6 +1174,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				printf ("EQD\n\n");
 				#endif
 
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
@@ -1480,7 +1206,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.jg (JIT_label[JIT_label_ind].lab);		// jump greater
+				a.ja (JIT_label[JIT_label_ind].lab);		// jump greater (double: above, after ucomisd)
 
 				// code for not greater than
 				a.mov (R8, Imm (0));
@@ -1526,6 +1252,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				printf ("EQD\n\n");
 				#endif
 
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
@@ -1554,7 +1284,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.jl (JIT_label[JIT_label_ind].lab);		// jump lower
+				a.jb (JIT_label[JIT_label_ind].lab);		// jump lower (double: below, after ucomisd)
 
 				// code for not lower than
 				a.mov (R8, Imm (0));
@@ -1600,6 +1330,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				printf ("EQD\n\n");
 				#endif
 
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
@@ -1628,7 +1362,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.jge (JIT_label[JIT_label_ind].lab);		// jump greater or equal
+				a.jae (JIT_label[JIT_label_ind].lab);		// jump greater or equal (double: above-or-equal, after ucomisd)
 
 				// code for less than
 				a.mov (R8, Imm (0));
@@ -1674,6 +1408,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				printf ("EQD\n\n");
 				#endif
 
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
@@ -1702,7 +1440,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				JIT_label[JIT_label_ind].if_ = -1;
 				JIT_label[JIT_label_ind].endif = -1;
 
-				a.jle (JIT_label[JIT_label_ind].lab);		// jump lower or equal
+				a.jbe (JIT_label[JIT_label_ind].lab);		// jump lower or equal (double: below-or-equal, after ucomisd)
 
 				// code for greater than
 				a.mov (R8, Imm (0));
@@ -1818,10 +1556,16 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r1v */
-				a.mov (R9, Imm (1));  // compare with one
+				A = load_int_reg (a, r1, -1, -1, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
+				a.cmp (int_cpu_reg (A), Imm (1));		// compare A, one
+
+				// store all dirty int registers to memory and reset int register
+				// tracking before the conditional jump: the jump target may be
+				// reached from other code paths (e.g. a loop back edge), so
+				// memory must be current at the jump target
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				label_created = 0;
 
@@ -1889,8 +1633,20 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* r2v */
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r2)), R8);
+				if (r1 != r2)
+				{
+					// load source register, then copy it into the destination register
+					A = load_int_reg (a, r1, r2, -1, -1);
+					C = result_int_reg (a, r2, r1, -1, -1);
+
+					// if C == A, the CPU register physically already holds the
+					// source value (the load / alloc only stored, never changed
+					// it), so tagging the slot as r2 is the copy itself
+					if (C != A)
+					{
+						a.mov (int_cpu_reg (C), int_cpu_reg (A));
+					}
+				}
 
 				run_jit = 1;
 				break;
@@ -1900,6 +1656,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				printf ("JIT-compiler: opcode: %i: R1 = %lli, R2 = %lli, R3 = %lli\n", code[i], r1, r2, r3);
 				printf ("MOVD\n\n");
 				#endif
+
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				r1 = code[i + 1];
 				r2 = code[i + 2];
@@ -1920,36 +1681,44 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* array base address */
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* index */
-				a.add (R8, R9);					/* R8 = base + index */
+				A = load_int_reg (a, r1, r2, r3, -1);	/* array base address */
+				B = load_int_reg (a, r2, r1, r3, -1);	/* index */
+
+				a.mov (RCX, int_cpu_reg (A));			/* RCX = base */
+				a.add (RCX, int_cpu_reg (B));			/* RCX = base + index */
+
+				C = result_int_reg (a, r3, r1, r2, -1);
 
 				switch (code[i])
 				{
 					case PUSHB:
-						a.movzx (R8, asmjit::x86::byte_ptr (RBX, R8));
+						a.movzx (int_cpu_reg (C), asmjit::x86::byte_ptr (RBX, RCX));
 						break;
 
 					case PUSHW:
-						a.movzx (R8, asmjit::x86::word_ptr (RBX, R8));
+						a.movzx (int_cpu_reg (C), asmjit::x86::word_ptr (RBX, RCX));
 						break;
 
 					case PUSHDW:
-						a.movzx (R8, asmjit::x86::dword_ptr (RBX, R8));
+						a.movzx (int_cpu_reg (C), asmjit::x86::dword_ptr (RBX, RCX));
 						break;
 
 					case PUSHQW:
-						a.mov (R8, asmjit::x86::qword_ptr (RBX, R8));
+						a.mov (int_cpu_reg (C), asmjit::x86::qword_ptr (RBX, RCX));
 						break;
 				}
 
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET(r3)), R8);
 				run_jit = 1;
 				break;
 
 			// PUSHD =========================================================================
 			// load double from data segment array: regd[r3] = data[regi[r1] + regi[r2]]
 			case PUSHD:
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
+
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
@@ -1973,28 +1742,30 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.mov (R9, asmjit::x86::qword_ptr (RSI, OFFSET(r2))); /* array base address */
-				a.mov (R10, asmjit::x86::qword_ptr (RSI, OFFSET(r3))); /* index */
-				a.add (R9, R10);				/* R9 = base + index */
+				A = load_int_reg (a, r2, r1, r3, -1);	/* array base address */
+				B = load_int_reg (a, r3, r1, r2, -1);	/* index */
 
-				a.mov (R8, asmjit::x86::qword_ptr (RSI, OFFSET(r1))); /* value to store */
+				a.mov (RCX, int_cpu_reg (A));			/* RCX = base */
+				a.add (RCX, int_cpu_reg (B));			/* RCX = base + index */
+
+				C = load_int_reg (a, r1, r2, r3, -1);	/* value to store */
 
 				switch (code[i])
 				{
 					case PULLB:
-						a.mov (asmjit::x86::byte_ptr (RBX, R9), asmjit::x86::r8b);
+						a.mov (asmjit::x86::byte_ptr (RBX, RCX), int_cpu_reg (C).r8 ());
 						break;
 
 					case PULLW:
-						a.mov (asmjit::x86::word_ptr (RBX, R9), asmjit::x86::r8w);
+						a.mov (asmjit::x86::word_ptr (RBX, RCX), int_cpu_reg (C).r16 ());
 						break;
 
 					case PULLDW:
-						a.mov (asmjit::x86::dword_ptr (RBX, R9), asmjit::x86::r8d);
+						a.mov (asmjit::x86::dword_ptr (RBX, RCX), int_cpu_reg (C).r32 ());
 						break;
 
 					case PULLQW:
-						a.mov (asmjit::x86::qword_ptr (RBX, R9), R8);
+						a.mov (asmjit::x86::qword_ptr (RBX, RCX), int_cpu_reg (C));
 						break;
 				}
 
@@ -2004,6 +1775,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 			// PULLD =========================================================================
 			// store double to data segment array: data[regi[r2] + regi[r3]] = regd[r1]
 			case PULLD:
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
+
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
@@ -2020,10 +1796,33 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 			// LOADA, LOADD ============================================================
 			// load from data segment: data[arg1 + arg2] -> regi[r3] (LOADA) / regd[r3] (LOADD)
 			case LOADA:
+				#if DEBUG
+					printf ("JIT-compiler: opcode: %i\n", code[i]);
+				#endif
+
+				memcpy (&r1, &code[i + 1], sizeof (uint64_t));		/* arg1 */
+				memcpy (&r2, &code[i + 9], sizeof (uint64_t));		/* arg2 */
+				r3 = code[i + 17];									/* target register */
+
+				C = result_int_reg (a, r3, -1, -1, -1);
+
+				a.mov (RCX, Imm (r1));								/* RCX = arg1 */
+				a.add (RCX, Imm (r2));								/* RCX = arg1 + arg2 */
+
+				a.mov (int_cpu_reg (C), asmjit::x86::qword_ptr (RBX, RCX));	/* load 8 bytes from data segment */
+
+				run_jit = 1;
+				break;
+
 			case LOADD:
 				#if DEBUG
 					printf ("JIT-compiler: opcode: %i\n", code[i]);
 				#endif
+
+				// double opcodes use CPU registers as scratch: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				memcpy (&r1, &code[i + 1], sizeof (uint64_t));		/* arg1 */
 				memcpy (&r2, &code[i + 9], sizeof (uint64_t));		/* arg2 */
@@ -2035,14 +1834,7 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
 				a.mov (R8, asmjit::x86::qword_ptr (RBX, R8));		/* load 8 bytes from data segment */
 
-				if (code[i] == LOADA)
-				{
-					a.mov (asmjit::x86::qword_ptr (RSI, OFFSET (r3)), R8);	/* regi[r3] = value */
-				}
-				else
-				{
-					a.mov (asmjit::x86::qword_ptr (RDI, OFFSET (r3)), R8);	/* regd[r3] = value */
-				}
+				a.mov (asmjit::x86::qword_ptr (RDI, OFFSET (r3)), R8);	/* regd[r3] = value */
 
 				run_jit = 1;
 				break;
@@ -2057,8 +1849,9 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				memcpy (&r1, &code[i + 1], sizeof (uint64_t));		/* literal */
 				r2 = code[i + 9];									/* target register */
 
-				a.mov (R8, Imm (r1));
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET (r2)), R8);	/* regi[r2] = literal */
+				C = result_int_reg (a, r2, -1, -1, -1);
+
+				a.mov (int_cpu_reg (C), Imm (r1));					/* regi[r2] = literal */
 
 				run_jit = 1;
 				break;
@@ -2074,11 +1867,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				memcpy (&r2, &code[i + 9], sizeof (uint64_t));		/* arg2 */
 				r3 = code[i + 17];									/* target register */
 
-				a.mov (R8, Imm (r1));
-				a.mov (R9, Imm (r2));
-				a.add (R8, R9);										/* R8 = arg1 + arg2 */
+				C = result_int_reg (a, r3, -1, -1, -1);
 
-				a.mov (asmjit::x86::qword_ptr (RSI, OFFSET (r3)), R8);	/* regi[r3] = address */
+				a.mov (int_cpu_reg (C), Imm (r1));					/* C = arg1 */
+				a.add (int_cpu_reg (C), Imm (r2));					/* C = arg1 + arg2 */
 
 				run_jit = 1;
 				break;
@@ -2093,6 +1885,10 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 
     if (run_jit)
     {
+		// store all dirty int registers to memory before leaving the JIT code
+		flush_int_regs (a);
+		clear_int_regs ();
+
         a.pop (RBX);		// restore RBX: callee saved register
         a.ret ();		// return to main program code
 
