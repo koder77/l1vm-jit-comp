@@ -67,7 +67,7 @@ typedef void (*Func)(void);
 #define MAXREGJIT_DOUBLE 16
 
 
-#define OFFSET(x) x * 8
+#define OFFSET(x) ((x) * 8)
 
 		#define RSI 	x0
 		#define RDI 	x1
@@ -79,6 +79,14 @@ typedef void (*Func)(void);
 		#define RCX 	x7
 		#define EAX 	x8
 		#define EDX		x9
+		// int register cache: x10 (0) to x13 (3), only used for cached int VM registers
+		#define C0 		x10
+		#define C1 		x11
+		#define C2 		x12
+		#define C3 		x13
+		// scratch registers: must not be used by the int register cache
+		#define SCRATCH 	x14
+		#define SCRATCH2	x15
 		// #define ST0     x86::fp7
 		// #define ST1     x86::fp6
 
@@ -140,6 +148,174 @@ S8 set_double_reg (S8 cpu_reg, S8 reg)
 	return (1);
 }
 
+// int registers code ==========================================================
+S8 jit_regs[MAXREGJIT_INT];			// C0 (0) to C3 (3): VM register number + 1, 0 = free
+U1 jit_regs_dirty[MAXREGJIT_INT];	// 1 = value in CPU register changed, must be stored to memory before flush
+
+a64::Gp int_cpu_reg (S8 idx)
+{
+	switch (idx)
+	{
+		case 0: return (C0);
+		case 1: return (C1);
+		case 2: return (C2);
+		case 3: return (C3);
+	}
+	return (C0);
+}
+
+S8 get_int_reg (S8 reg)
+{
+	S8 i;
+
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		if (jit_regs[i] == reg + 1)
+		{
+			return (i);
+		}
+	}
+	return (-1);	// jit register not found
+}
+
+S8 get_free_int_reg (void)
+{
+	S8 i;
+
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		if (jit_regs[i] == 0)
+		{
+			return (i);
+		}
+	}
+	return (-1);	// no free jit register found
+}
+
+void set_int_reg (S8 cpu_reg, S8 reg)
+{
+	jit_regs[cpu_reg] = reg + 1;
+}
+
+void free_int_reg (S8 cpu_reg)
+{
+	jit_regs[cpu_reg] = 0;
+	jit_regs_dirty[cpu_reg] = 0;
+}
+
+void flush_int_reg (Assembler &a, S8 cpu_reg)
+{
+	// store dirty CPU register value to VM register in memory
+	if (jit_regs_dirty[cpu_reg] == 1)
+	{
+		a.str (int_cpu_reg (cpu_reg), ptr (RSI, OFFSET (jit_regs[cpu_reg] - 1)));
+		jit_regs_dirty[cpu_reg] = 0;
+	}
+}
+
+void flush_int_regs (Assembler &a)
+{
+	S8 i;
+
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		flush_int_reg (a, i);
+	}
+}
+
+void clear_int_regs (void)
+{
+	S8 i;
+
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		jit_regs[i] = 0;
+		jit_regs_dirty[i] = 0;
+	}
+}
+
+S8 alloc_int_reg (Assembler &a, S8 reg, S8 avoid1, S8 avoid2, S8 avoid3)
+{
+	S8 cur;
+	S8 i;
+
+	cur = get_int_reg (reg);
+	if (cur != -1)
+	{
+		return (cur);
+	}
+
+	cur = get_free_int_reg ();
+	if (cur == -1)
+	{
+		// evict a CPU register, but do not evict registers holding avoid1, avoid2, avoid3
+		for (i = 0; i < MAXREGJIT_INT; i++)
+		{
+			if (jit_regs[i] != avoid1 + 1 && jit_regs[i] != avoid2 + 1 && jit_regs[i] != avoid3 + 1 && jit_regs_dirty[i] == 0)
+			{
+				cur = i;
+				break;
+			}
+		}
+
+		if (cur == -1)
+		{
+			for (i = 0; i < MAXREGJIT_INT; i++)
+			{
+				if (jit_regs[i] != avoid1 + 1 && jit_regs[i] != avoid2 + 1 && jit_regs[i] != avoid3 + 1)
+				{
+					cur = i;
+					break;
+				}
+			}
+		}
+
+		if (cur == -1)
+		{
+			cur = 0;
+		}
+
+		flush_int_reg (a, cur);
+		free_int_reg (cur);
+	}
+
+	set_int_reg (cur, reg);
+	jit_regs_dirty[cur] = 0;
+	return (cur);
+}
+
+S8 load_int_reg (Assembler &a, S8 reg, S8 avoid1, S8 avoid2, S8 avoid3)
+{
+	S8 cur;
+
+	cur = get_int_reg (reg);
+	if (cur != -1)
+	{
+		return (cur);
+	}
+
+	cur = alloc_int_reg (a, reg, avoid1, avoid2, avoid3);
+	a.ldr (int_cpu_reg (cur), ptr (RSI, OFFSET (reg)));
+	jit_regs_dirty[cur] = 0;
+	return (cur);
+}
+
+S8 result_int_reg (Assembler &a, S8 reg, S8 avoid1, S8 avoid2, S8 avoid3)
+{
+	S8 cur;
+
+	cur = get_int_reg (reg);
+	if (cur != -1)
+	{
+		jit_regs_dirty[cur] = 1;
+		return (cur);
+	}
+
+	cur = alloc_int_reg (a, reg, avoid1, avoid2, avoid3);
+	jit_regs_dirty[cur] = 1;
+	return (cur);
+}
+
 extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *regd, U1 *sp, U1 *sp_top, U1 *sp_bottom, S8 start, S8 end, struct JIT_code *JIT_code, S8 JIT_code_ind, S8 code_size)
 {
     S8 i ALIGN;
@@ -152,10 +328,16 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
     U1 label_created;
     S8 label ALIGN;
     U1 run_jit = 0;
+    U1 after_uncond_jmp = 0;
 
 	S8 r1_d ALIGN;
 	S8 r2_d ALIGN;
 	S8 r3_d ALIGN;
+
+	// CPU registers used for int register tracking
+	S8 A ALIGN;
+	S8 B ALIGN;
+	S8 C ALIGN;
 
 	// JMP opcode:
 	U1 jump_ok = 0;
@@ -194,6 +376,13 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 	for (i = 0; i <= 5; i++)
 	{
 		jit_regsd[i] = 0;
+	}
+
+	// init int register cache
+	for (i = 0; i < MAXREGJIT_INT; i++)
+	{
+		jit_regs[i] = 0;
+		jit_regs_dirty[i] = 0;
 	}
 
     i = start;
@@ -256,6 +445,20 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
                         printf ("LABEL binded!\n");
                     #endif
 				}
+
+				// a label can be reached from different code paths: store all
+				// dirty int registers to memory and reset int register tracking
+				//
+				// exception: if the label follows an unconditional JMP, the JMP
+				// already flushed live state, and cache allocations made in the
+				// (dead) skipped block are stale -- flushing here would clobber
+				// memory with garbage
+				if (!after_uncond_jmp)
+				{
+					flush_int_regs (a);
+				}
+				after_uncond_jmp = 0;
+				clear_int_regs ();
             }
         }
 
@@ -384,29 +587,29 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 					}
 				#endif
 
-	            a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+	            A = load_int_reg (a, r1, r2, r3, -1);
+	            B = load_int_reg (a, r2, r1, r3, -1);
+	            C = result_int_reg (a, r3, r1, r2, -1);
 
 				switch (code[i])
 				{
 					case ADDI:
-						a.add (R10, R8, R9);
+						a.add (int_cpu_reg (C), int_cpu_reg (A), int_cpu_reg (B));
 						break;
 
 					case SUBI:
-						a.sub (R10, R8, R9);
+						a.sub (int_cpu_reg (C), int_cpu_reg (A), int_cpu_reg (B));
 						break;
 
 					case MULI:
-						a.mul (R10, R8, R9);
+						a.mul (int_cpu_reg (C), int_cpu_reg (A), int_cpu_reg (B));
 						break;
 
 					case DIVI:
-						a.sdiv (R10, R8, R9);
+						a.sdiv (int_cpu_reg (C), int_cpu_reg (A), int_cpu_reg (B));
 						break;
 				}
 
-				a.str (R10, ptr (RSI, OFFSET(r3)));
 				run_jit = 1;
 				break;
 
@@ -499,12 +702,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.ands (R10, R8, R9);
+				a.ands (int_cpu_reg (C), int_cpu_reg (A), int_cpu_reg (B));
 
-				a.str (R10, ptr (RSI, OFFSET(r3)));
 				run_jit = 1;
 				break;
 
@@ -517,12 +720,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.orr (R10, R8, R9);
+				a.orr (int_cpu_reg (C), int_cpu_reg (A), int_cpu_reg (B));
 
-				a.str (R10, ptr (RSI, OFFSET(r3)));
 				run_jit = 1;
 				break;
 
@@ -535,12 +738,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.eor (R10, R8, R9);
+				a.eor (int_cpu_reg (C), int_cpu_reg (A), int_cpu_reg (B));
 
-				a.str (R10, ptr (RSI, OFFSET(r3)));
 				run_jit = 1;
 				break;
 
@@ -553,14 +756,14 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R10, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.sdiv (R9, R8, R10);
-				a.mul (R9, R9, R10);
-				a.subs (R8, R8, R9);
+				a.sdiv (SCRATCH, int_cpu_reg (A), int_cpu_reg (B));		/* SCRATCH = A / B */
+				a.mul (SCRATCH, SCRATCH, int_cpu_reg (B));				/* SCRATCH = (A / B) * B */
+				a.sub (int_cpu_reg (C), int_cpu_reg (A), SCRATCH);		/* C = A - (A / B) * B */
 
-				a.str (R8, ptr (RSI, OFFSET(r3)));
 				run_jit = 1;
 				break;
 
@@ -575,66 +778,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-				a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b_eq (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.cmp (int_cpu_reg (A), int_cpu_reg (B));		// compare A, B
+				a.cset (int_cpu_reg (C), CondCode::kEQ);		// C = 1 if A == B, else 0
 
 				run_jit = 1;
 				break;
@@ -649,64 +798,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b_ne (JIT_label[JIT_label_ind].lab);		// jump not equal
-
-				a.mov (R8, Imm (0));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-						JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				a.mov (R8, Imm (1));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.cmp (int_cpu_reg (A), int_cpu_reg (B));		// compare A, B
+				a.cset (int_cpu_reg (C), CondCode::kNE);		// C = 1 if A != B, else 0
 
 				run_jit = 1;
 				break;
@@ -721,66 +818,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b_gt (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.cmp (int_cpu_reg (A), int_cpu_reg (B));		// compare A, B
+				a.cset (int_cpu_reg (C), CondCode::kGT);		// C = 1 if A > B, else 0
 
 				run_jit = 1;
 				break;
@@ -795,66 +838,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-				a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP lower
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b_lt (JIT_label[JIT_label_ind].lab);		// jump lower
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.cmp (int_cpu_reg (A), int_cpu_reg (B));		// compare A, B
+				a.cset (int_cpu_reg (C), CondCode::kLT);		// C = 1 if A < B, else 0
 
 				run_jit = 1;
 				break;
@@ -869,66 +858,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b_ge (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.cmp (int_cpu_reg (A), int_cpu_reg (B));		// compare A, B
+				a.cset (int_cpu_reg (C), CondCode::kGE);		// C = 1 if A >= B, else 0
 
 				run_jit = 1;
 				break;
@@ -943,66 +878,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.ldr (R9, ptr (RSI, OFFSET(r2)));
+				A = load_int_reg (a, r1, r2, r3, -1);
+				B = load_int_reg (a, r2, r1, r3, -1);
+				C = result_int_reg (a, r3, r1, r2, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
-
-				// set label for JUMP equal
-				if (JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b_le (JIT_label[JIT_label_ind].lab);		// jump equal
-
-				// code for not equal than
-				a.mov (R8, Imm (0));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				// set label for jump equal
-
-				// set label for JUMP END
-				if (label_created == 0 && JIT_label_ind < MAXJUMPLEN)
-				{
-					JIT_label_ind++;
-				}
-				else
-				{
-					if (JIT_label_ind == MAXJUMPLEN)
-					{
-						printf ("JIT compiler: error label list full!\n");
-						return (1);
-					}
-				}
-
-				JIT_label[JIT_label_ind].lab = a.new_label ();
-				JIT_label[JIT_label_ind].pos = jumpoffs[j];
-				JIT_label[JIT_label_ind].if_ = -1;
-				JIT_label[JIT_label_ind].endif = -1;
-
-				a.b (JIT_label[JIT_label_ind].lab);
-
-				a.bind (JIT_label[JIT_label_ind - 1].lab);	// set label for jmp equal
-
-				// code for equal than
-				a.mov (R8, Imm (1));
-				a.str (R8, ptr (RSI, OFFSET(r3)));
-
-				a.bind (JIT_label[JIT_label_ind].lab);		// set label for equal jump
+				a.cmp (int_cpu_reg (A), int_cpu_reg (B));		// compare A, B
+				a.cset (int_cpu_reg (C), CondCode::kLE);		// C = 1 if A <= B, else 0
 
 				run_jit = 1;
 				break;
@@ -1017,6 +898,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
+
+				// double compare writes result to int register r3: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				a.ldr (d0, ptr (RDI, OFFSET(r1)));
                 a.ldr (d1, ptr (RDI, OFFSET(r2)));
@@ -1092,6 +978,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
+				// double compare writes result to int register r3: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
+
 				a.ldr (d0, ptr (RDI, OFFSET(r1)));
                 a.ldr (d1, ptr (RDI, OFFSET(r2)));
 
@@ -1165,6 +1056,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
+
+				// double compare writes result to int register r3: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				a.ldr (d0, ptr (RDI, OFFSET(r1)));
 				a.ldr (d1, ptr (RDI, OFFSET(r2)));
@@ -1240,6 +1136,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
+				// double compare writes result to int register r3: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
+
 				a.ldr (d0, ptr (RDI, OFFSET(r1)));
 				a.ldr (d1, ptr (RDI, OFFSET(r2)));
 
@@ -1314,6 +1215,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
+				// double compare writes result to int register r3: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
+
 				a.ldr (d0, ptr (RDI, OFFSET(r1)));
                 a.ldr (d1, ptr (RDI, OFFSET(r2)));
 
@@ -1387,6 +1293,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
+
+				// double compare writes result to int register r3: store all dirty
+				// int registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				a.ldr (d0, ptr (RDI, OFFSET(r1)));
                 a.ldr (d1, ptr (RDI, OFFSET(r2)));
@@ -1464,6 +1375,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
+				// store all dirty int registers to memory and reset int register
+				// tracking before the jump: the jump target may be reached from
+				// other code paths, so memory must be current at the jump target
+				flush_int_regs (a);
+				clear_int_regs ();
+
 				label_created = 0;
 
 				// printf ("DEBUG: JIT: JMP...\n");
@@ -1530,10 +1447,16 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-	            a.mov (R9, Imm (1));
+				A = load_int_reg (a, r1, -1, -1, -1);
 
-				a.cmp (R8, R9);		// compare R8, R9
+				a.cmp (int_cpu_reg (A), Imm (1));		// compare A, one
+
+				// store all dirty int registers to memory and reset int register
+				// tracking before the conditional jump: the jump target may be
+				// reached from other code paths (e.g. a loop back edge), so
+				// memory must be current at the jump target
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				label_created = 0;
 
@@ -1601,9 +1524,19 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1)));
-				a.mov (R9, R8);
-				a.str (R9, ptr (RSI, OFFSET(r2)));
+				if (r1 != r2)
+				{
+					// load source register, then copy it into the destination register
+					A = load_int_reg (a, r1, r2, -1, -1);
+					C = result_int_reg (a, r2, r1, -1, -1);
+
+					// if C == A, the CPU register physically already holds the
+					// source value, so tagging the slot as r2 is the copy itself
+					if (C != A)
+					{
+						a.mov (int_cpu_reg (C), int_cpu_reg (A));
+					}
+				}
 
 				run_jit = 1;
 				break;
@@ -1634,8 +1567,9 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				memcpy (&r1, &code[i + 1], sizeof (uint64_t));
 				r2 = code[i + 9];
 
-				a.mov (R8, imm (r1));
-				a.str (R8, ptr (RSI, OFFSET(r2)));
+				C = result_int_reg (a, r2, -1, -1, -1);
+
+				a.mov (int_cpu_reg (C), imm (r1));
 
 				run_jit = 1;
 				break;
@@ -1651,10 +1585,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				memcpy (&r2, &code[i + 9], sizeof (uint64_t));
 				r3 = code[i + 17];
 
-				a.mov (R8, imm (r1));
-				a.mov (R9, imm (r2));
-				a.add (R10, R8, R9);			/* R10 = arg1 + arg2 */
-				a.str (R10, ptr (RSI, OFFSET(r3)));
+				C = result_int_reg (a, r3, -1, -1, -1);
+
+				a.mov (int_cpu_reg (C), imm (r1));		/* C = arg1 */
+				a.mov (SCRATCH, imm (r2));
+				a.add (int_cpu_reg (C), int_cpu_reg (C), SCRATCH);		/* C = arg1 + arg2 */
 
 				run_jit = 1;
 				break;
@@ -1670,11 +1605,12 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				memcpy (&r2, &code[i + 9], sizeof (uint64_t));
 				r3 = code[i + 17];
 
-				a.mov (R8, imm (r1));
-				a.mov (R9, imm (r2));
-				a.add (R10, R8, R9);			/* R10 = arg1 + arg2 */
-				a.ldr (R8, ptr (RBX, R10));		/* load 64 bit from data segment */
-				a.str (R8, ptr (RSI, OFFSET(r3)));
+				C = result_int_reg (a, r3, -1, -1, -1);
+
+				a.mov (int_cpu_reg (C), imm (r1));		/* C = arg1 */
+				a.mov (SCRATCH, imm (r2));
+				a.add (int_cpu_reg (C), int_cpu_reg (C), SCRATCH);		/* C = arg1 + arg2 */
+				a.ldr (int_cpu_reg (C), ptr (RBX, int_cpu_reg (C)));	/* load 64 bit from data segment */
 
 				run_jit = 1;
 				break;
@@ -1709,30 +1645,32 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1))); /* array base address */
-				a.ldr (R9, ptr (RSI, OFFSET(r2))); /* index */
-				a.add (R10, R8, R9);				/* R10 = base + index */
+				A = load_int_reg (a, r1, r2, r3, -1);	/* array base address */
+				B = load_int_reg (a, r2, r1, r3, -1);	/* index */
+
+				a.add (SCRATCH, int_cpu_reg (A), int_cpu_reg (B));	/* SCRATCH = base + index */
+
+				C = result_int_reg (a, r3, r1, r2, -1);
 
 				switch (code[i])
 				{
 					case PUSHB:
-						a.ldrb (R8, ptr (RBX, R10));
+						a.ldrb (int_cpu_reg (C).w(), ptr (RBX, SCRATCH));
 						break;
 
 					case PUSHW:
-						a.ldrh (R8, ptr (RBX, R10));
+						a.ldrh (int_cpu_reg (C).w(), ptr (RBX, SCRATCH));
 						break;
 
 					case PUSHDW:
-						a.ldr (R8.w(), ptr (RBX, R10));
+						a.ldr (int_cpu_reg (C).w(), ptr (RBX, SCRATCH));
 						break;
 
 					case PUSHQW:
-						a.ldr (R8, ptr (RBX, R10));
+						a.ldr (int_cpu_reg (C), ptr (RBX, SCRATCH));
 						break;
 				}
 
-				a.str (R8, ptr (RSI, OFFSET(r3)));
 				run_jit = 1;
 				break;
 
@@ -1742,6 +1680,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
+
+				// reads int registers r1, r2 from memory: store all dirty int
+				// registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				a.ldr (R8, ptr (RSI, OFFSET(r1))); /* array base address */
 				a.ldr (R9, ptr (RSI, OFFSET(r2))); /* index */
@@ -1762,28 +1705,29 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r2 = code[i + 2];
 				r3 = code[i + 3];
 
-				a.ldr (R9, ptr (RSI, OFFSET(r2))); /* array base address */
-				a.ldr (R10, ptr (RSI, OFFSET(r3))); /* index */
-				a.add (R9, R9, R10);				/* R9 = base + index */
+				A = load_int_reg (a, r2, r1, r3, -1);	/* array base address */
+				B = load_int_reg (a, r3, r1, r2, -1);	/* index */
 
-				a.ldr (R8, ptr (RSI, OFFSET(r1))); /* value to store */
+				a.add (SCRATCH, int_cpu_reg (A), int_cpu_reg (B));	/* SCRATCH = base + index */
+
+				C = load_int_reg (a, r1, r2, r3, -1);	/* value to store */
 
 				switch (code[i])
 				{
 					case PULLB:
-						a.strb (R8, ptr (RBX, R9));
+						a.strb (int_cpu_reg (C).w(), ptr (RBX, SCRATCH));
 						break;
 
 					case PULLW:
-						a.strh (R8, ptr (RBX, R9));
+						a.strh (int_cpu_reg (C).w(), ptr (RBX, SCRATCH));
 						break;
 
 					case PULLDW:
-						a.str (R8.w(), ptr (RBX, R9));
+						a.str (int_cpu_reg (C).w(), ptr (RBX, SCRATCH));
 						break;
 
 					case PULLQW:
-						a.str (R8, ptr (RBX, R9));
+						a.str (int_cpu_reg (C), ptr (RBX, SCRATCH));
 						break;
 				}
 
@@ -1796,6 +1740,11 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
 				r1 = code[i + 1];
 				r2 = code[i + 2];
 				r3 = code[i + 3];
+
+				// reads int registers r2, r3 from memory: store all dirty int
+				// registers to memory and reset int register tracking
+				flush_int_regs (a);
+				clear_int_regs ();
 
 				a.ldr (R9, ptr (RSI, OFFSET(r2))); /* array base address */
 				a.ldr (R10, ptr (RSI, OFFSET(r3))); /* index */
@@ -1811,11 +1760,19 @@ extern "C" int jit_compiler (U1 *code, U1 *data, S8 *jumpoffs, S8 *regi, F8 *reg
                 printf ("JIT compiler: UNKNOWN opcode: %i - exiting!\n", code[i]);
                 return (1);
         }
+        if (code[i] == JMP)
+        {
+            after_uncond_jmp = 1;
+        }
         i = i + offset;
     }
 
     if (run_jit)
     {
+		// store all remaining dirty int registers to memory: the interpreter
+		// resumes reading regi[] from memory after run_jit returns
+		flush_int_regs (a);
+
 		// a.mov (R8, imm (0));   // R8 zero
         a.ret (x30);		// return to main program code
 
