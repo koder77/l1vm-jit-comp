@@ -686,3 +686,7 @@ if (NOT ASMJIT_EMBED)
 
   endif()
 endif()
+
+if (TARGET asmjit)
+  set_target_properties(asmjit PROPERTIES OUTPUT_NAME "asmjit-l1vm")
+endif()
